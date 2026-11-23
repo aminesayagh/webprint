@@ -1,481 +1,129 @@
-# section-scan
+# webprint
 
-A local Python CLI that captures a webpage, proposes its major sections with the reasons for each
-boundary, lets you correct and confirm them, and exports the approved list as JSON. It detects regions and
-boundaries only; it does not rebuild the layout inside each section.
+**Turn a website into structured data: its sections, its layouts and its routes.**
 
-## Setup
+webprint opens a page in a real browser and describes what a visitor sees. It splits the page into its
+major sections (header, hero, pricing, footer…), explains why it placed each boundary, and exports each
+section's content, position and screenshot as JSON. A second tool maps a whole site into route families
+and page layouts, so you can capture each layout once instead of every page.
 
-Requires Python 3.12 (managed by [uv](https://docs.astral.sh/uv/)) and a Chromium build for Playwright.
+> **Status: experimental.** This is a working research tool, not a production library. The heuristics
+> are tuned on a handful of real sites and test fixtures, the output formats may still change, and there
+> is no stable Python API yet; use it through the command line. Known gaps are listed in
+> [`notice.md`](notice.md).
 
-```bash
-uv sync                                 # create .venv with the locked dependencies
-uv run playwright install chromium      # browser used for capture (once per machine)
-uv run section-scan --help
-uv run pytest                           # full test suite (~2 minutes; uses Chromium)
-```
+## What it does
 
-To install the command elsewhere: `uv build`, then `pip install dist/section_scan-*.whl` in any Python
-3.12+ environment, followed by `python -m playwright install chromium`.
-
-## Workflow
-
-From the project folder, prefix commands with `uv run` (or activate `.venv`, or install the wheel):
-
-```bash
-uv run section-scan capture https://example.com -o runs/example --width 1440 --height 900
-uv run section-scan detect runs/example            # uses ./detector.toml if present, or --config FILE
-uv run section-scan report runs/example --open     # self-contained HTML: regions + every boundary's evidence
-uv run section-scan review runs/example            # interactive; type `help`
-uv run section-scan export runs/example -o sections.json
-```
-
-Only `capture` visits the site. Everything after it works offline on the saved run directory, so
-detection can be rerun (for example with a different `detector.toml`) without recapturing. The same capture
-and config always give the same ordered result.
-
-| Command | What it does |
-|---|---|
-| `capture URL -o DIR` | Loads the page once and saves `manifest.json`, `screenshot.png` and `elements.json`. It waits for fonts, images and layout within time limits, and scrolls within limits so lazy-loaded content appears. Add `--headed --manual-ready` to dismiss banners yourself before capture. |
-| `detect DIR` | Writes `groups.json` (simplified visual groups), `candidates.json` (regions, boundaries and evidence) and `proposals.json` (decisions and proposed sections). |
-| `report DIR` | Writes `report.html` for the reviewed state, or the raw proposals if there is no review yet, and `report.json` (see below). |
-| `review DIR [CMD …]` | Interactive prompt, or one command: `list`, `inspect`, `rename`, `merge`, `split ID Y\|bN [crossing=above\|below]`, `adjust ID top=… bottom=…`, `exclude`, `confirm ID`, `confirm all`, `undo`, `report`, `finish`. |
-| `export DIR -o FILE [--draft]` | Writes confirmed sections in top-to-bottom `order`. A normal export fails until every retained region is confirmed; `--draft` includes unconfirmed regions marked `proposed`. |
-| `overlay DIR [--id …\|--group …\|--regions\|--sections]` | Diagnostic: draws elements, groups, regions or sections over the screenshot. |
-| `evaluate DIR ANNOTATION` | Compares the detector with container-only and gaps-only baselines (see `evaluation/README.md`); uses `./detector.toml` like `detect`. |
-
-## Three breakpoints
-
-`capture URL -o DIR` (without `--width`/`--height`) loads the page three times, as each device would:
-
-| Breakpoint | Viewport | Emulated device |
+| Tool | Input | Output |
 |---|---|---|
-| laptop | 1440×900 | desktop browser |
-| tablet | 768×1024 | iPad Mini (user agent, touch, mobile mode) |
-| mobile | 390×844 | iPhone 13 (user agent, touch, mobile mode) |
+| **`section-scan`** | One URL | The page's sections at laptop, tablet and mobile sizes: boundaries with evidence, content as a tree, one screenshot per section, an HTML report |
+| **`section-scan classify`** | A captured page | A label per section (`hero`, `pricing`, `faq`, …) and for the page (industry, page type), proposed by an AI model and confirmed by you |
+| **`section-scan board`** | Captured pages | One Excalidraw board with every page side by side, per breakpoint, sections annotated |
+| **`route-map`** | A site's home URL | Its route families (`/product/{product_slug}` instead of 1,000 URLs), page roles and distinct layouts |
 
-Each load is a normal run in `DIR/laptop`, `DIR/tablet`, `DIR/mobile`, so `review`, `overlay`, `export` and
-`evaluate` work on each. `detect DIR` and `report DIR` handle all three, and `report DIR` writes the merged
-`DIR/report.json`:
+## Quick start
 
-- Sections follow the laptop layout, plus sections that exist only at smaller sizes, in their place.
-- Each section has `position` per breakpoint and `hidden`: the breakpoints where none of its content shows.
-- Each content entry has `hidden` when it is missing at some breakpoints (omitted when shown everywhere).
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/) and a Chromium build for Playwright.
 
-**Matching content across loads:**
+```bash
+git clone https://github.com/aminesayagh/webprint.git && cd webprint
+uv sync                                  # install dependencies into .venv
+uv run playwright install chromium       # one-time browser download
 
-1. **Same tag and text:** the same content, wherever it sits. This covers a desktop nav link and the
-   same link in the mobile menu, or an image in a gallery that reshuffles and re-rows itself per width.
-2. **Same DOM slot** (a path such as `#work>ul>li[3]>h3`): the same content, even with different text.
-   This is what keeps random content (a rotating testimonial) from being listed once per breakpoint.
-3. **Otherwise:** the content exists only at those breakpoints.
+uv run section-scan capture https://example.com -o runs/example   # laptop, tablet and mobile
+uv run section-scan detect runs/example
+uv run section-scan report runs/example --open
+```
 
-**Limitations:**
+Then review and export one breakpoint's sections, or map a whole site:
 
-- Random content that also changes the page's structure between loads can still be mismatched.
-- Element `id`s generated anew on each load make DOM paths differ; matching then falls back to text.
+```bash
+uv run section-scan review runs/example/laptop   # interactive: rename, merge, split, confirm
+uv run section-scan export runs/example/laptop -o sections.json
+uv run route-map https://example.com -o route-map.json --summary route-map.md
+```
 
-## Section screenshots and the board
+Only `capture` and `route-map` visit the site. Everything else works offline on the saved run, so you can
+rerun detection with different settings without loading the page again.
 
-- **Section screenshots:** `report` also saves one screenshot per section in `RUN/sections/`
-  (`NN-<id or role>.png`, full resolution). For a three-breakpoint capture, each breakpoint folder gets
-  its own.
-  - **How they are taken:** `capture` saves an offline copy of the page (`page.mhtml`: Chrome's snapshot of
-    the DOM with styles, images and fonts, and no scripts). Chrome's snapshot only links web fonts, and the
-    copy loads nothing from outside itself, so `capture` first writes the page's web fonts into it (fonts
-    from same-origin stylesheets; a cross-origin stylesheet such as a font CDN's cannot be read). Each section is then screenshotted from that
-    copy with **the other sections and floating elements painted in front of it made transparent**, so
-    cookie banners, sticky bars or a neighbouring section pulled up over it do not cover it. What is
-    painted behind it stays, e.g. a background its text is designed to sit on. Paint order follows the
-    browser's rule: higher `z-index`, then positioned over static, then later in the page. Nothing
-    reflows, and the site is not visited again.
-  - **Framing:** each section is framed where its own elements are in the copy. Styles that scripts added
-    can be missing from the copy, so its layout may differ from the capture. When the copy sizes a
-    section more than 10% wider, narrower, taller or shorter than captured (text re-flowed one word per
-    line, say), the section is cropped from the live capture's screenshot instead.
-  - **Sticky sections:** a section with sticky elements (content pinned while scrolling, such as reveal
-    footers) at most two screens tall is shot as seen at the end of scrolling through it, so the pinned
-    content sits over what scrolls under it (that shot is one screen tall). A longer one, such as a
-    pinned "Women" label beside a column of products, is shot whole, laid out flat.
-  - **Canvas, video and iframe sections:** the copy does not keep canvas drawings, video frames or
-    iframe contents, so sections holding them are cropped from the live capture's screenshot. Anything
-    that covered them at capture time stays in their picture.
-  - **Older captures:** captures without the copy fall back to cropping `screenshot.png`.
-- **The board:** `section-scan board` writes `boards/sections.excalidraw`, one Excalidraw file for every
-  page.
-  - **Columns:** pages left to right, each shown three times side by side (laptop, tablet, mobile), every
-    column built from that breakpoint's own screenshot. The note at each column's top left has the title,
-    link, industry and scope once classified, and the breakpoint. A single-viewport capture has one
-    column.
-  - **Sections:** top to bottom in each column, each with a note at its top left (its confirmed or
-    proposed label, or its role). A section hidden at a breakpoint is absent from that column.
-  - **Which captures:** without arguments it takes the most recent capture of each page in `./runs`;
-    pass folders to choose.
+## Example output
 
-**Re-running a site:** `capture` into an existing folder updates it. The new capture replaces the old
-screenshot, elements and everything derived from them. `classification.json` and `review.json` are kept:
-classification reuses only proposals whose input is unchanged, and a review asks for `--restart` once
-the proposals change.
-
-## report.json
-
-A compact summary next to `report.html`, with sections top to bottom (excluded ones left out):
+`report.json` describes each section in page order:
 
 ```json
 {
   "link": "https://example.com/",
   "title": "Page title",
-  "description": "Meta description",
   "sections": [
     {
       "id": "pricing",
-      "position": { "x": 0, "y": 900, "width": 1440, "height": 982 },
-      "flags": ["ambiguous", "hidden_content", "overlaps:overlay"],
       "role": "flow",
+      "position": { "x": 0, "y": 900, "width": 1440, "height": 982 },
       "message": [
         { "tag": "group", "children": [ { "tag": "h2", "text": "Pricing" }, { "tag": "p", "text": "Pick one of these plans." } ] },
-        { "tag": "ul", "children": [ { "tag": "li", "text": "Starter" }, { "tag": "li", "text": "Pro" } ] },
-        { "tag": "p", "text": "Start free" }
+        { "tag": "ul", "children": [ { "tag": "li", "text": "Starter" }, { "tag": "li", "text": "Pro" } ] }
       ]
     }
   ]
 }
 ```
 
-- **`id`:** the `id` attribute of the outermost element that wraps all of the section's visible content and
-  nothing from another section, so `#id` scrolls to it; `null` when there is none.
-- **`position`:** document-space CSS pixels.
-- **`message`:** the section's visible text in page order, following the page's DOM branches.
-  Wrappers around a single branch are looked through. A branch whose parts are single items (a heading
-  and its paragraph, the links of one nav) becomes a `group`, or `ul`/`ol` for a list, with them as
-  `children`; a lone item stays an item, and loose text becomes `p`. A branch whose parts hold several
-  items themselves is split into those parts, so a group never contains another group. Headings,
-  paragraphs and list items keep their tag (`h1`–`h6`, `p`, `li`); other text inside a group is `text`.
-  A `group` with no siblings is unwrapped: its items become the message itself.
-  A list item that holds headings or paragraphs of its own (a work entry: date, title, description) keeps
-  them as its `children`: the only place a third level appears.
-- **Images:** every image is an entry in page order: `{ "tag": "img", "text": "<alt>", "src": "<url>" }`.
-  - `text` is absent when the image has no alt text (or `alt=""`).
-  - `src` is the file the browser displayed, resolved to a full URL. Embedded `data:` images keep only
-    their type (e.g. `data:image/png`).
-  - Across breakpoints, an image without alt text is matched by its `src`.
-  - Jev's classification input keeps alt text only; images with nothing but a URL are left out of it.
-- **What text counts:** the DOM text, including parts not painted at capture (a closed `<details>`,
-  content waiting for an animation). Left out: elements removed with `display: none` (typically duplicate
-  mobile menus) and screen-reader-only text.
-- **Older captures:** captures made before extractor 3 have no `id`, title or description, and only
-  80-character text previews.
+## How it works
 
-## Classifying sections (Jev)
+1. **Capture:** Playwright loads the page at each breakpoint and waits for fonts, images and lazy content.
+   It records every rendered element (box, styles, text, DOM path) together with a full-page screenshot
+   and an offline copy of the page.
+2. **Detect:** the elements are simplified into visual groups. Candidate boundaries come from containers,
+   landmarks, spacing gaps and background changes, and each boundary is marked split, kept or ambiguous,
+   with the evidence behind that decision.
+3. **Review:** nothing is confirmed automatically. You merge, split, rename and confirm sections, and
+   every step can be undone.
+4. **Merge breakpoints:** content is matched across the three loads (same text first, then same DOM
+   slot), so each section knows where it sits, and what it hides, at each size.
+5. **Map the site (route-map):** a polite crawler (it obeys robots.txt, is throttled and stays within a
+   budget) reads sitemaps and links, groups URLs into families, and checks sampled pages to confirm that a
+   family really shares one layout.
 
-```bash
-uv run section-scan classify runs/example            # propose with Jev, then confirm each label
-uv run section-scan classify runs/example --no-review
-uv run section-scan classify runs/example --hide-dom-id   # evaluation: same content without DOM ids
+## Documentation
+
+- [`docs/section-scan.md`](docs/section-scan.md): capture, detection, review, breakpoints, screenshots,
+  the board, classification, `report.json` and tuning (`detector.toml`).
+- [`docs/route-map.md`](docs/route-map.md): discovery, route families, validation, page roles, templates
+  and the output schema.
+- [`evaluation/README.md`](evaluation/README.md): how the detector and route-map are measured.
+- [`notice.md`](notice.md): known issues and postponed decisions.
+
+## Project layout
+
+```
+src/section_scan/   page capture, section detection, review, report, classification, board
+src/route_map/      site crawling, route families, validation, roles, templates
+tests/              pytest suite (uses a real Chromium; about 2 minutes)
+fixtures/           small HTML pages the tests capture
+evaluation/         annotations and scripts that score the detector against baselines
+detector.toml       detector settings (optional; defaults apply without it)
 ```
 
-- **API key:** put `TYPESAFE_API_KEY=…` in `./.env` (git-ignored; a real environment variable wins).
-  `TYPESAFE_DEFAULT_MODEL` picks the model (default `jev-latest`).
-- **Labels:** the registry in `src/section_scan/labels.py` (version `REGISTRY_VERSION`), shared by the
-  Jev requests and the review screen: `header`, `footer`, `hero`, `about`, `services`, `portfolio`,
-  `case_studies`, `testimonials`, `faq`, `gallery`, `contact`, `cta`, `other`, `unknown`.
-- **Input per section:** the page title and description, order, layout role, DOM id (a hint), and
-  `message` with its hierarchy. Exact duplicates are removed. Long content keeps the headings and the
-  first items of each group, and is marked `input_shortened`.
-- **Requests:** a section with no usable text is proposed `unknown` (`insufficient_content`, source
-  `preprocessing`) without a request. Every other section gets one `Choice` request. A failed request is
-  `failed`, never `unknown`, and is retried on the next run.
-- **Review:** sections are shown in page order with the heading, a preview, the proposal and the next two
-  labels. Actions: accept, choose another, leave unresolved, or quit (progress is kept). Your decision is
-  stored separately from Jev's proposal.
-- **Files:** `classification.json` holds the full state (proposals with probabilities, model, status and
-  decisions), saved after every step. `report-classified.json` is the report with a compact
-  `classification` per section and for the page: `{"label": …}`.
-  - The label is your decision when you made one (`null` when left unresolved), else Jev's proposal;
-    `null` when the request failed. Confidence and probabilities stay in `classification.json`.
-- **Reuse:** proposals are reused only when the input, instructions, registry and requested model all
-  match. A decision made on older evidence is dropped.
-- **Page: industry and scope.** After the sections, one request asks two `Choice` questions about the
-  whole page:
-  - **`industry`:** about 20 broad sectors plus `other`/`unknown`.
-  - **`scope`:** the page type, e.g. `company_site`, `personal_portfolio`, `product_landing`,
-    `service_landing`, `online_store`, `blog_article`, `documentation`.
+Run the tests with `uv run pytest`.
 
-  Its input is the domain, title, description, and each section's role, label (your confirmed label,
-  else the proposal), headings and an excerpt. Both registries are in `labels.py`
-  (`PAGE_REGISTRY_VERSION`). The page is reviewed like a section, and the export adds a top-level
-  `classification` with `industry` and `scope`, each `{"label", "confidence"}`. If you quit the section review, the page waits for the
-  next session, so it is judged on your final section labels.
+## Configuration
 
-## Section policy
-
-- A **section** is a major visual or functional region of a vertically flowing page. It may span several
-  source elements. Cards and nested content groups are children of a section, not sections themselves.
-- **Header and footer** landmarks are kept as their own sections. A `<header>` taller than 300 px or
-  starting below 200 px is treated as content (often a hero banner).
-- **Overlays** (fixed elements such as cookie banners, chat buttons and skip links) are separate sections
-  you can `exclude` during review.
-- **Labels are provisional** ("Section 3"). Naming a section "pricing" is your call, made with `rename`.
-- A boundary is **split**, **kept**, or **ambiguous**. Ambiguous boundaries still cut the list, but the
-  sections next to them are flagged, because merging in review is easier than splitting.
-- **Nothing is confirmed automatically.** Confirmation is yours, per section or with `confirm all`, and
-  `confirm all` only works after you have generated the report for exactly the current state.
-
-## Tuning (`detector.toml`)
-
-Lengths are CSS px; shares are fractions of a width or height, in (0, 1].
-
-| Group | Key | Default | Meaning |
-|---|---|---|---|
-| Structure | `geometry_tolerance` | 2 | Edges this close (px) count as the same box |
-| | `touch_tolerance` | 2 | Overlaps this small (px) count as touching, not crossing |
-| | `max_nesting` | 3 | Deepest level of nested alternative regions below a top-level region |
-| | `full_width` | 0.9 | Width share that counts as full width (fallback header, dominant paint, page-wide paint change) |
-| | `dominant_paint_height` | 0.5 | Height share a painted descendant needs to colour its region |
-| Headers & footers | `header_max_top` | 200 | A header landmark must start within this distance of the top... |
-| | `header_max_height` | 300 | ...and be at most this tall; otherwise it is content (often a hero) |
-| | `top_edge` | 10 | A fallback (non-landmark) header must start this close to the top |
-| | `footer_max_gap` | 100 | A footer landmark must end this close to the page bottom... |
-| | `footer_min_width` | 0.5 | ...and span at least this share of the page width |
-| Spacing | `gap_ratio_threshold` | 3.0 | Content gap ÷ local spacing at or above this counts as a strong gap |
-| | `fallback_spacing_floor` | 16 | Spacing floor in CSS px when no line height can be measured |
-| | `min_spacing_observations` | 2 | Internal gaps a side needs before its spacing estimate counts |
-| | `spacing_depth` | 2 | Stacking levels of rows that internal spacing is measured in |
-| Limitations | `hidden_min_height` | 300 | A band of invisible captured content this tall is flagged `hidden_content` |
-| Decisions | `mode` | `combined` | `container` or `gaps` run the evaluation baselines |
-
-These are experimental starting values, not validated constants. Out-of-range values and unknown keys
-are rejected. `groups.json`, `candidates.json` and `proposals.json` each record the full effective
-configuration.
+- **Classification** uses TypeSafe's Jev model through `typesafe-sdk`. Put `TYPESAFE_API_KEY=…` in a
+  `.env` file (git-ignored). Every other command works without it.
+- **Detection** reads `./detector.toml` if present. The keys and their defaults are listed in
+  [`docs/section-scan.md`](docs/section-scan.md#tuning-detectortoml).
 
 ## Limits
 
-- **Pages:** one URL and one viewport per capture; ordinary vertically flowing desktop pages.
-- **Not inspected:**
-  - iframe contents, closed shadow roots and canvas pixels;
-  - nested scroll areas, recorded as `scroll_container`;
-  - scroll-driven effects. Content that only appears while scrolling may be missing from the screenshot.
-    A tall band of a section holding only such invisible content is recorded on the section as a
-    `hidden_content` limitation.
+- Vertically flowing pages work best. App shells, canvas-heavy pages and scroll-driven animations are
+  only partly understood, and areas the tool cannot inspect are recorded as limitations rather than
+  reported as empty.
+- iframes, closed shadow roots and canvas pixels are not inspected.
+- route-map reads served HTML and does not render JavaScript, so a client-rendered site shows up as a
+  possible JavaScript shell.
 
-  Uninspected areas are recorded as limitations, never treated as empty.
-- **Covered content:** an element hidden under another opaque element (for example a fixed header) is
-  detected only inside the viewport at capture time. Elsewhere on the page, whether it is covered is
-  recorded as unknown, and the element counts as visible.
-- **Screenshots:** a full-page screenshot is evidence of one moment, not of every dynamic state.
-- **Element IDs:** they belong to one capture. A recapture gets a new capture ID, and approvals do not
-  carry over to a changed page.
-- **Re-running detection:** after a new detection run, review requires `--restart`. The old review is
-  archived, not overwritten.
-- **Inner alternatives:** they are explored up to three levels deep (`MAX_NESTING` in candidates.py), so a
-  section nested deeper inside another region is not offered as a split.
-- **Splitting and adjusting:** only flow sections can be split or adjusted. Content crossing a cut
-  needs an explicit `crossing=` choice.
-- **Single reviewer:** there's no locking, so don't review the same run from two terminals at once.
+## Roadmap
 
-## route-map: a site's route families
-
-A second command in this repo. It turns one website into a compact map of **route families**: 1,000
-product pages become one route, `/product/{segment_2}`, instead of 1,000 entries. Single pages such as
-`/about` stay on their own. It infers routes from the URLs it sees. It does not read the site's source
-router and does not prove that every value works. Its output is not an SEO XML sitemap.
-
-The plan is `vault/AI-Memory/02_projects/quickshop/sitemap-route-generator-plan.md`. All six milestones
-are built: discovery from the seed URL, route families, their validation on sampled pages, page roles, the
-export views, and the plan's test scenarios with measurements (see `evaluation/README.md`, "route-map").
-
-```bash
-uv run route-map https://shop.example/ -o route-map.json --summary route-map.md   # or: python -m route_map ...
-uv run route-map https://shop.example/ --inventory urls.txt -o route-map.json     # a URL list, nothing fetched
-```
-
-**Worked example** (masayagh.com, default budgets; `--summary` output):
-
-| Route | Status | Role | URLs | Samples |
-| --- | --- | --- | --- | --- |
-| `/contact/?service={service}` | validated_on_sample | contact | 6 | 6 |
-| `/` | individual | home | 1 | 1 |
-| `/contact/` | individual | contact | 1 | 1 |
-
-The six "Start a project" links (`?service=Product discovery`, `?service=Dashboards`, ...) are one
-family: their pages share a template and carry a contact form. The map took 12 requests.
-
-- **Discovery:** the crawler (Scrapy) obeys robots.txt and reads it for `Sitemap:` declarations. If there
-  are none, it tries `/sitemap.xml` and `/sitemap_index.xml`, then relies on links.
-  - **Sitemaps:** indexes are followed recursively, gzipped files included. Limits stop runaway files:
-    a seen set (cycles), `--max-sitemap-files`, 50 MB per file after decompression, and safe XML parsing
-    (no entity expansion). **Sitemap URLs only go into the inventory**: 1,000 products listed in a sitemap
-    cost no page requests.
-  - **Pages:** HTML pages are fetched from the seed outward. Half of `--max-html-pages` goes to discovery;
-    the rest goes to validation samples, then to template sampling (see Templates). Pages are fetched in waves: a wave is chosen only once every
-    page in flight has answered, so the map does not depend on which response comes back first. A wave
-    takes one waiting page per path shape not fetched yet (one product page is enough to show the product
-    family, so the budget reaches the blog, pages and so on), then a few more members when every shape is
-    known. Ties go to the shallower page, then the URL in sorted order.
-  - **Redirects:** they are recorded, not followed blindly. The old URL keeps a `redirect_to`, the target
-    is queued like any link, and a redirect never takes the crawl to another host. `--max-depth` bounds how far from the seed links are followed.
-  - **Never requested:** forms, action links (logout, add to cart, delete, ...), binary assets (images,
-    PDFs, fonts, ...), other hosts (listed in `skipped_hosts`; `--include-subdomains` widens this), and
-    pages disallowed by robots.txt (`blocked_urls`).
-  - **Throttling:** requests are throttled (Scrapy AutoThrottle, at most 4 at a time), time out after 20 s
-    and are retried twice, except page requests: a retry would be a page outside `--max-html-pages`. `--deadline-seconds` (300 by default) bounds the whole discovery.
-  - **Partial maps:** a budget that runs out yields a partial map, with the reason in
-    `crawl_report.stop_reasons`. A seed page without links in its HTML is reported as a possible
-    JavaScript shell; pages are not rendered in this version.
-- **Input:** `--inventory` is a text file with one URL per line (`#` lines are skipped). URLs on another
-  host than the seed, or that are not HTTP(S), are listed under `crawl_report.rejected_urls`.
-- **URL identity (conservative):** the scheme, default ports, ordinary `#anchors` and tracking parameters
-  (`utm_*`, `gclid`, `fbclid`, ...) are ignored. Everything else is kept as written: path case, `%2F`,
-  extensions, the trailing slash, and unknown query parameters with their order, blank values and repeated
-  keys. Duplicates become `aliases` of one URL record.
-- **Families:** URLs of the same shape (host, depth, trailing slash, extension, query keys) that differ in
-  exactly one slot become a family once that slot takes at least 3 different values, e.g.
-  `/blog/{segment_2}`, `/p/{segment_2}.html` or `/search?q={q}`. When a URL fits two candidates, a varying
-  path segment wins over a query value and the rightmost segment over earlier ones (URLs vary most at their
-  end); then the larger family wins.
-  - **Two parameters:** one-parameter families that differ only in one other path segment, at least 3 of
-    them, merge into one family. For example, `/collections/men/products/{x}`, `/collections/women/products/{x}`
-    and so on become `/collections/{segment_2}/products/{segment_4}`. URLs of the same shape left out of
-    every family (a collection with one product) join it. Samples are spread over the outer value (one per
-    collection first). Language prefixes never merge (`/en/...`, `/fr/...` stay separate), and the merged
-    pattern must keep a constant path segment.
-  - **Rules that hold:**
-    - `/blog/{slug}` and `/blog/category/{slug}` are different families.
-    - Locale prefixes stay separate (`/en/product/...`, `/fr/product/...`).
-    - Root pages (`/about`, `/contact`, `/privacy`) are never folded into a catch-all `/{segment_1}`.
-- **Validation on samples:** once discovery has nothing left to fetch, each family's planned samples are
-  fetched. The plan spreads them over different value shapes (`item-12` and `compare` are different
-  shapes), and families take turns so a 1,000-product family cannot use up the budget. Pages fetched
-  during discovery count as samples for free. A family whose samples disagree gets up to 3 more.
-  - **What is compared:** each page's main content (`<main>`, `[role=main]` or `<article>`; otherwise the
-    body without header, nav, footer and aside, marked as weaker evidence) as a set of tag paths such as
-    `ul>li>a`. Texts, prices, generated ids and how many cards repeat do not count; a different component
-    does. Pages whose JSON-LD names different things (Product vs Article) never agree. Signals read outside
-    the main content (`og:type` or article dates in `<head>`, a search box in the header) do not count.
-  - **Agreement:** two pages agree when their structure overlaps by at least 50% (Jaccard). A page joins a
-    group only when it agrees with every member, so a page halfway between two unlike pages does not chain
-    them together. Pages are taken in URL path order, so the groups do not change with the host or port.
-  - **Unusable samples:** samples that failed, were blocked, redirected elsewhere, or read as an error,
-    sign-in or challenge page are set aside (`unusable_sample` evidence). They never count against their
-    family.
-- **Status of each route:**
-  - `validated_on_sample`: at least 3 usable samples agree. Samples that differ become their own
-    `individual` routes (`/product/compare`), listed in the family's `excluded_literals` and
-    `exception_route_ids`. Unsampled members stay inferred (`inferred_unsampled_url_count`), not verified.
-  - **Two templates under one pattern** (3+ samples each): one route per template (`template: "a"`, `"b"`).
-    The unsampled members' URLs cannot tell which template they use, so they are `ambiguous`, with their
-    `candidate_route_ids`.
-  - `unresolved`: enough usable samples, but no 3 agree. The observed pages become individual routes; the
-    rest stay in the unresolved family.
-  - `provisional`: too few usable samples, for example when the page budget ran out (said in
-    `stop_reasons`), or with `--inventory`, which fetches nothing.
-  - `individual`: a URL in no family.
-- **Evidence:** each validated route lists what its samples share: `main_structure` (e.g. `5/5`), the
-  JSON-LD type, functional signals (`purchase`, `listing`, `article_meta`, `search`, `password`,
-  `contact_form`), and a `canonical` that points elsewhere.
-- **Page roles:** each route gets a `role` (`home`, `product_detail`, `product_listing`, `article`,
-  `article_listing`, `search_results`, `contact`, `authentication`, `cart`, `checkout`, `informational`
-  or `unknown`) and a `role_certainty`. The rules are small and listed in `src/route_map/roles.py`; the
-  reason is kept as `role` evidence.
-  - **`supported`:** at least 80% of the usable samples show the role's cues. For example, a product page
-    has Product JSON-LD and a purchase control; a product listing has a grid whose links reach product
-    pages; a login page has a password field in its main content (a sign-in box in the header does not
-    count).
-  - **`weak`:** cues on at least half the samples, or only words in the URL (`/products/...`,
-    `/blog/...`, `/cart`).
-  - **`unknown`:** no cue, an unresolved family, or two supported roles that contradict each other (the
-    reason is given). Two overlaps are settled on purpose: a product page with a related-products grid
-    stays a product page, and a search page listing products is `search_results`. An exception split off
-    a family (`/product/compare`) does not take a role from its URL words: they describe the family.
-- **Parameter names:** parameters are renamed only when the route's role is `supported`. Otherwise they
-  keep their neutral names (`{segment_2}`).
-  - **The last path parameter** is named after the role: `{product_slug}` or `{product_id}`,
-    `{article_slug}` or `{article_id}`, `{category_slug}` for listings.
-  - **An earlier one** is named after the word before it: `{category_slug}` after `/collections/` or
-    `/category/`, as in `/collections/{category_slug}/products/{product_slug}`.
-- **Output:** versioned JSON (`schema_version`) holding:
-  - `routes`, each with at most 3 `examples`;
-  - `urls`: the full inventory, each with its `route_id` (or `assignment: "ambiguous"` / `"unresolved"`),
-    its discovery `sources` and any `redirect_to`;
-  - `observations`: the pages fetched, each with its status, final URL, title, links, structure features,
-    JSON-LD types, breadcrumbs, signals and canonical (a 200 that reads as an error or a challenge page is
-    marked `unsuitable`);
-  - `tree`: the URL prefix hierarchy. A node without a route of its own (`/product` when only
-    `/product/{product_slug}` exists) is `synthetic`: a grouping, not a discovered page;
-  - `links`: route-to-route links actually seen on fetched pages (`from`, `to`, how many links, from how
-    many pages), kept apart from the prefix tree, so no category-to-product relation is invented;
-  - `crawl_report`: budgets, requests used, sitemap results, skipped/blocked/failed URLs, stop reasons and
-    limitations.
-- **Summary:** `--summary FILE` also writes a Markdown table of the routes (status, role, URL and sample
-  counts, examples), their exceptions, and why the map is partial if it is. Its IDs and ordering depend only on the set of URLs, not on their order.
-- **Limits (heuristics, see also `notice.md`):**
-  - **At most two parameters per family:** a second one comes only from merging sibling families
-    (below), and three or more are not inferred. A sibling family with fewer than 3 members stays apart
-    unless its URLs fit a merged family.
-  - **No rendering:** pages are read as served HTML. A JavaScript shell (a seed page without links) is
-    reported, not rendered, and hash-router URLs are flagged, not followed.
-  - **Word lists:** action links are skipped by URL words, so `/product/remove-tool` would be skipped too.
-    Error-page titles, purchase and checkout buttons and the role URL words cover English plus a few
-    French and German phrases.
-  - **No pagination naming:** a numeric segment keeps a neutral name. There is no pagination evidence
-    (such as `rel=next`) yet.
-  - **Structure threshold:** 50% overlap of main-content structure decides whether two pages share a
-    template. It was tuned on fixtures, not proven on every site.
-
-### Templates
-
-A **template** is a page layout: the checked pages whose main content has the same skeleton, whatever their
-URL. A **route** groups URLs by pattern. The two are independent:
-
-- **A template can span routes:** `/about` and `/privacy` built on one layout are one template over two
-  routes, and so are a collection page and a search page that render the same product grid.
-- **A route can hold several templates:** a provisional family whose few checked pages differ.
-
-The purpose is screenshots: `templates` lists every layout seen on the site with one `representative` URL
-(the member closest on average to the others), so section-scan captures each layout once. A false merge
-(two layouts in one template) hides a layout; a false split only costs one extra screenshot. The rules lean
-towards splitting.
-
-- **Skeleton:** the same tag paths as validation, with one change. A **rich-text block** counts as one
-  `rich_text` token, whatever it holds, so two posts on the same layout agree even when their bodies differ.
-  - **What counts as rich text:** an element with at least 3 prose children (paragraphs, headings, lists,
-    tables, figures, images), at least 2 of them `p`, prose making up at least 70% of its children, and no
-    `section` or `form` inside. The main-content root itself is never collapsed.
-  - **Why cards stay layout:** a product card (`img`, `h3`, one `p`) has one paragraph, so it is not rich
-    text. A list counts as prose only when its items hold text: a `ul` of product cards (items holding a
-    `div`, `img`, heading, `table` or `form`) is layout, so a page wrapper around an intro and a product
-    grid is not collapsed. A different card is a different template, and it should get its own screenshot.
-- **Clustering:** every usable checked page of the site is grouped by skeleton, with the same 50% rule and
-  JSON-LD check as validation. A page that failed, redirected or read as an error page has no template.
-- **Templates phase:** after validation, the rest of the page budget keeps fetching unchecked members of
-  each family, in rounds, while that family's pages keep touching templates the family had not touched
-  before. Such a template may already exist elsewhere on the site: a blog post on the home page's layout
-  still counts as new for the blog family.
-  - **Saturation:** each family counts the pages checked since it last touched a new template; the count
-    is updated once per round (to 0 after any round in which the family touched a new template, otherwise
-    up by the pages that round checked). The family is saturated once the count reaches
-    `--saturation-window` (5 by default). A family validated on one template, with no exceptions, is
-    saturated from the start, so a 1,000-product shop spends nothing more on products.
-  - **Single pages:** each URL in no family is checked once, except pages that were already requested and
-    were not HTML, and pages found only deeper than `--max-depth` (links of pages fetched after discovery).
-  - **Budget:** families take turns, up to one window of pages each per round. When the budget runs out,
-    `stop_reasons` names each family still showing new templates (with how many members were not checked)
-    and how many individual pages were never checked.
-  - **Options:** `--templates` (the default) runs this phase; `--no-templates` stops after validation, and
-    the inventory then covers only the pages already fetched.
-- **Output (`schema_version` "2"):**
-  - `templates`: each with an `id`, its `representative`, a `status` (`repeated` or `single`),
-    `checked_page_count`, `inferred_page_count` (members never fetched of a validated route whose samples
-    all use this template; members fetched but unusable, such as redirects, are not counted), its `route_ids`, `page_ids` and `evidence` (`skeleton`, `rich_text`,
-    `structured_data`);
-  - `urls[].template_id`: set on checked pages only. Unchecked URLs have no template;
-  - `observations[].rich_text_blocks`: how many rich-text blocks were collapsed on that page;
-  - the `--summary` file adds a Templates table.
-- **Limits:**
-  - **No rendering:** the skeleton is read from served HTML, not from what the browser paints. Two layouts
-    that differ only in CSS are one template.
-  - **The rich-text rule is a heuristic:** a large custom component inside a post body (a pricing table
-    built from divs, an embedded form) is not collapsed, so that post may count as a new template.
-  - **Saturation is not proof:** a layout used by 1 page in 500 can be missed when no sampled page uses it.
-    The stop reasons show where the budget ended before a family settled.
-  - **The 50% threshold** was tuned on fixtures, not proven on every site.
+- **Change tracking:** keep a snapshot per visit and report what changed between two visits, and in
+  which section.
+- Stable element references across captures, so reviews and labels carry over to a recapture.
